@@ -20,22 +20,21 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
-import android.graphics.drawable.InsetDrawable;
 import android.support.v7.widget.LinearLayoutManager;
 import android.support.v7.widget.RecyclerView.State;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Toast;
 
 import com.android.launcher3.BaseContainerView;
 import com.android.launcher3.CellLayout;
 import com.android.launcher3.DeleteDropTarget;
-import com.android.launcher3.DeviceProfile;
-import com.android.launcher3.DragController;
 import com.android.launcher3.DragSource;
 import com.android.launcher3.DropTarget.DragObject;
-import com.android.launcher3.Folder;
+import com.android.launcher3.dragndrop.DragOptions;
+import com.android.launcher3.folder.Folder;
 import com.android.launcher3.IconCache;
 import com.android.launcher3.ItemInfo;
 import com.android.launcher3.Launcher;
@@ -45,38 +44,38 @@ import com.android.launcher3.R;
 import com.android.launcher3.Utilities;
 import com.android.launcher3.WidgetPreviewLoader;
 import com.android.launcher3.Workspace;
+import com.android.launcher3.dragndrop.DragController;
 import com.android.launcher3.model.WidgetsModel;
+import com.android.launcher3.userevent.nano.LauncherLogProto;
+import com.android.launcher3.userevent.nano.LauncherLogProto.Target;
 import com.android.launcher3.util.Thunk;
+import com.android.launcher3.util.TransformingTouchDelegate;
 
 /**
  * The widgets list view container.
  */
 public class WidgetsContainerView extends BaseContainerView
-        implements View.OnLongClickListener, View.OnClickListener, DragSource{
-
+        implements View.OnLongClickListener, View.OnClickListener, DragSource {
     private static final String TAG = "WidgetsContainerView";
-    private static final boolean DEBUG = false;
-
-    /* Coefficient multiplied to the screen height for preloading widgets. */
-    private static final int PRELOAD_SCREEN_HEIGHT_MULTIPLE = 1;
+    private static final boolean LOGD = false;
 
     /* Global instances that are used inside this container. */
     @Thunk Launcher mLauncher;
     private DragController mDragController;
     private IconCache mIconCache;
 
+    private final Rect mTmpBgPaddingRect = new Rect();
+
     /* Recycler view related member variables */
-    private View mContent;
-    private WidgetsRecyclerView mView;
+    private WidgetsRecyclerView mRecyclerView;
     private WidgetsListAdapter mAdapter;
+    private TransformingTouchDelegate mRecyclerViewTouchDelegate;
 
     /* Touch handling related member variables. */
     private Toast mWidgetInstructionToast;
 
     /* Rendering related. */
     private WidgetPreviewLoader mWidgetPreviewLoader;
-
-    private Rect mPadding = new Rect();
 
     public WidgetsContainerView(Context context) {
         this(context, null);
@@ -88,49 +87,47 @@ public class WidgetsContainerView extends BaseContainerView
 
     public WidgetsContainerView(Context context, AttributeSet attrs, int defStyleAttr) {
         super(context, attrs, defStyleAttr);
-        mLauncher = (Launcher) context;
+        mLauncher = Launcher.getLauncher(context);
         mDragController = mLauncher.getDragController();
-        mAdapter = new WidgetsListAdapter(context, this, this, mLauncher);
+        mAdapter = new WidgetsListAdapter(this, this, context);
         mIconCache = (LauncherAppState.getInstance()).getIconCache();
-        if (DEBUG) {
+        if (LOGD) {
             Log.d(TAG, "WidgetsContainerView constructor");
         }
     }
 
     @Override
-    protected void onFinishInflate() {
-        mContent = findViewById(R.id.content);
-        mView = (WidgetsRecyclerView) findViewById(R.id.widgets_list_view);
-        mView.setAdapter(mAdapter);
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        super.onLayout(changed, left, top, right, bottom);
+        getRevealView().getBackground().getPadding(mTmpBgPaddingRect);
+        mRecyclerViewTouchDelegate.setBounds(
+                mRecyclerView.getLeft() - mTmpBgPaddingRect.left,
+                mRecyclerView.getTop() - mTmpBgPaddingRect.top,
+                mRecyclerView.getRight() + mTmpBgPaddingRect.right,
+                mRecyclerView.getBottom() + mTmpBgPaddingRect.bottom);
+    }
 
-        // This extends the layout space so that preloading happen for the {@link RecyclerView}
-        mView.setLayoutManager(new LinearLayoutManager(getContext()) {
-            @Override
-            protected int getExtraLayoutSpace(State state) {
-                DeviceProfile grid = mLauncher.getDeviceProfile();
-                return super.getExtraLayoutSpace(state)
-                        + grid.availableHeightPx * PRELOAD_SCREEN_HEIGHT_MULTIPLE;
-            }
-        });
-        mPadding.set(getPaddingLeft(), getPaddingTop(), getPaddingRight(),
-                getPaddingBottom());
+    @Override
+    protected void onFinishInflate() {
+        super.onFinishInflate();
+        mRecyclerView = (WidgetsRecyclerView) getContentView().findViewById(R.id.widgets_list_view);
+        mRecyclerView.setAdapter(mAdapter);
+        mRecyclerView.setLayoutManager(new LinearLayoutManager(getContext()));
+        mRecyclerViewTouchDelegate = new TransformingTouchDelegate(mRecyclerView);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        ((View) mRecyclerView.getParent()).setTouchDelegate(mRecyclerViewTouchDelegate);
     }
 
     //
     // Returns views used for launcher transitions.
     //
 
-    public View getContentView() {
-        return mView;
-    }
-
-    public View getRevealView() {
-        // TODO(hyunyoungs): temporarily use apps view transition.
-        return findViewById(R.id.widgets_reveal_view);
-    }
-
     public void scrollToTop() {
-        mView.scrollToPosition(0);
+        mRecyclerView.scrollToPosition(0);
     }
 
     //
@@ -148,14 +145,17 @@ public class WidgetsContainerView extends BaseContainerView
         if (mWidgetInstructionToast != null) {
             mWidgetInstructionToast.cancel();
         }
-        mWidgetInstructionToast = Toast.makeText(getContext(),R.string.long_press_widget_to_add,
-                Toast.LENGTH_SHORT);
+
+        CharSequence msg = Utilities.wrapForTts(
+                getContext().getText(R.string.long_press_widget_to_add),
+                getContext().getString(R.string.long_accessible_way_to_add));
+        mWidgetInstructionToast = Toast.makeText(getContext(), msg, Toast.LENGTH_SHORT);
         mWidgetInstructionToast.show();
     }
 
     @Override
     public boolean onLongClick(View v) {
-        if (DEBUG) {
+        if (LOGD) {
             Log.d(TAG, String.format("onLonglick [v=%s]", v));
         }
         // Return early if this is not initiated from a touch
@@ -164,14 +164,13 @@ public class WidgetsContainerView extends BaseContainerView
         if (!mLauncher.isWidgetsViewVisible() ||
                 mLauncher.getWorkspace().isSwitchingState()) return false;
         // Return if global dragging is not enabled
-        Log.d(TAG, String.format("onLonglick dragging enabled?.", v));
         if (!mLauncher.isDraggingEnabled()) return false;
 
         boolean status = beginDragging(v);
         if (status && v.getTag() instanceof PendingAddWidgetInfo) {
             WidgetHostViewLoader hostLoader = new WidgetHostViewLoader(mLauncher, v);
             boolean preloadStatus = hostLoader.preloadWidget();
-            if (DEBUG) {
+            if (LOGD) {
                 Log.d(TAG, String.format("preloading widget [status=%s]", preloadStatus));
             }
             mLauncher.getDragController().addDragListener(hostLoader);
@@ -210,7 +209,7 @@ public class WidgetsContainerView extends BaseContainerView
 
         // Compose the drag image
         Bitmap preview;
-        float scale = 1f;
+        final float scale;
         final Rect bounds = image.getBitmapBounds();
 
         if (createItemInfo instanceof PendingAddWidgetInfo) {
@@ -247,17 +246,14 @@ public class WidgetsContainerView extends BaseContainerView
             scale = ((float) mLauncher.getDeviceProfile().iconSizePx) / preview.getWidth();
         }
 
-        // Don't clip alpha values for the drag outline if we're using the default widget preview
-        boolean clipAlpha = !(createItemInfo instanceof PendingAddWidgetInfo &&
-                (((PendingAddWidgetInfo) createItemInfo).previewImage == 0));
+        // Since we are not going through the workspace for starting the drag, set drag related
+        // information on the workspace before starting the drag.
+        mLauncher.getWorkspace().prepareDragWithProvider(
+                new PendingItemPreviewProvider(v, createItemInfo, preview));
 
         // Start the drag
-        mLauncher.lockScreenOrientation();
-        mLauncher.getWorkspace().onDragStartedWithItem(createItemInfo, preview, clipAlpha);
         mDragController.startDrag(image, preview, this, createItemInfo,
-                bounds, DragController.DRAG_ACTION_COPY, scale);
-
-        preview.recycle();
+                bounds, scale, new DragOptions());
         return true;
     }
 
@@ -267,7 +263,7 @@ public class WidgetsContainerView extends BaseContainerView
 
     @Override
     public boolean supportsFlingToDelete() {
-        return false;
+        return true;
     }
 
     @Override
@@ -300,6 +296,9 @@ public class WidgetsContainerView extends BaseContainerView
     @Override
     public void onDropCompleted(View target, DragObject d, boolean isFlingToDelete,
             boolean success) {
+        if (LOGD) {
+            Log.d(TAG, "onDropCompleted");
+        }
         if (isFlingToDelete || !success || (target != mLauncher.getWorkspace() &&
                 !(target instanceof DeleteDropTarget) && !(target instanceof Folder))) {
             // Exit spring loaded mode if we have not successfully dropped or have not handled the
@@ -317,7 +316,7 @@ public class WidgetsContainerView extends BaseContainerView
                 int currentScreen = mLauncher.getCurrentWorkspaceScreen();
                 Workspace workspace = (Workspace) target;
                 CellLayout layout = (CellLayout) workspace.getChildAt(currentScreen);
-                ItemInfo itemInfo = (ItemInfo) d.dragInfo;
+                ItemInfo itemInfo = d.dragInfo;
                 if (layout != null) {
                     showOutOfSpaceMessage =
                             !layout.findCellForSpan(null, itemInfo.spanX, itemInfo.spanY);
@@ -330,34 +329,22 @@ public class WidgetsContainerView extends BaseContainerView
         }
     }
 
-    //
-    // Container rendering related.
-    //
-
-    @Override
-    protected void onUpdateBackgroundAndPaddings(Rect searchBarBounds, Rect padding) {
-        // Apply the top-bottom padding to the content itself so that the launcher transition is
-        // clipped correctly
-        mContent.setPadding(0, padding.top, 0, padding.bottom);
-
-        // TODO: Use quantum_panel_dark instead of quantum_panel_shape_dark.
-        InsetDrawable background = new InsetDrawable(
-                getResources().getDrawable(R.drawable.quantum_panel_shape_dark), padding.left, 0,
-                padding.right, 0);
-        Rect bgPadding = new Rect();
-        background.getPadding(bgPadding);
-        mView.setBackground(background);
-        getRevealView().setBackground(background.getConstantState().newDrawable());
-        mView.updateBackgroundPadding(bgPadding);
-    }
-
     /**
      * Initialize the widget data model.
      */
     public void addWidgets(WidgetsModel model) {
-        mView.setWidgets(model);
+        mRecyclerView.setWidgets(model);
         mAdapter.setWidgetsModel(model);
         mAdapter.notifyDataSetChanged();
+
+        View loader = getContentView().findViewById(R.id.loader);
+        if (loader != null) {
+            ((ViewGroup) getContentView()).removeView(loader);
+        }
+    }
+
+    public boolean isEmpty() {
+        return mAdapter.getItemCount() == 0;
     }
 
     private WidgetPreviewLoader getWidgetPreviewLoader() {
@@ -365,5 +352,10 @@ public class WidgetsContainerView extends BaseContainerView
             mWidgetPreviewLoader = LauncherAppState.getInstance().getWidgetCache();
         }
         return mWidgetPreviewLoader;
+    }
+
+    @Override
+    public void fillInLaunchSourceData(View v, ItemInfo info, Target target, Target targetParent) {
+        targetParent.containerType = LauncherLogProto.WIDGETS;
     }
 }

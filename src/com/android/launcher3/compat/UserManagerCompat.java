@@ -17,8 +17,6 @@
 package com.android.launcher3.compat;
 
 import android.content.Context;
-import android.graphics.drawable.Drawable;
-import android.os.Build;
 
 import com.android.launcher3.Utilities;
 
@@ -34,7 +32,13 @@ public abstract class UserManagerCompat {
     public static UserManagerCompat getInstance(Context context) {
         synchronized (sInstanceLock) {
             if (sInstance == null) {
-                if (Utilities.ATLEAST_LOLLIPOP) {
+                if (Utilities.isNycMR1OrAbove()) {
+                    sInstance = new UserManagerCompatVNMr1(context.getApplicationContext());
+                } else if (Utilities.isNycOrAbove()) {
+                    sInstance = new UserManagerCompatVN(context.getApplicationContext());
+                } else if (Utilities.ATLEAST_MARSHMALLOW) {
+                    sInstance = new UserManagerCompatVM(context.getApplicationContext());
+                } else if (Utilities.ATLEAST_LOLLIPOP) {
                     sInstance = new UserManagerCompatVL(context.getApplicationContext());
                 } else if (Utilities.ATLEAST_JB_MR1) {
                     sInstance = new UserManagerCompatV17(context.getApplicationContext());
@@ -54,7 +58,10 @@ public abstract class UserManagerCompat {
     public abstract List<UserHandleCompat> getUserProfiles();
     public abstract long getSerialNumberForUser(UserHandleCompat user);
     public abstract UserHandleCompat getUserForSerialNumber(long serialNumber);
-    public abstract Drawable getBadgedDrawableForUser(Drawable unbadged, UserHandleCompat user);
     public abstract CharSequence getBadgedLabelForUser(CharSequence label, UserHandleCompat user);
     public abstract long getUserCreationTime(UserHandleCompat user);
+    public abstract boolean isQuietModeEnabled(UserHandleCompat user);
+    public abstract boolean isUserUnlocked(UserHandleCompat user);
+
+    public abstract boolean isDemoUser();
 }

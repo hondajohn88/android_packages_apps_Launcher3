@@ -16,7 +16,6 @@
 
 package com.android.launcher3;
 
-import android.animation.ObjectAnimator;
 import android.annotation.TargetApi;
 import android.content.Context;
 import android.content.res.ColorStateList;
@@ -27,6 +26,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Region;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.util.AttributeSet;
@@ -36,13 +36,15 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewDebug;
 import android.view.ViewParent;
-import android.view.animation.AccelerateInterpolator;
-import android.view.animation.DecelerateInterpolator;
 import android.widget.TextView;
 
 import com.android.launcher3.IconCache.IconLoadRequest;
+import com.android.launcher3.folder.FolderIcon;
 import com.android.launcher3.model.PackageItemInfo;
+
+import java.text.NumberFormat;
 
 /**
  * TextView that draws a bubble behind the text. We cannot use a LineBackgroundSpan
@@ -54,25 +56,22 @@ public class BubbleTextView extends TextView
 
     private static SparseArray<Theme> sPreloaderThemes = new SparseArray<Theme>(2);
 
-    private static final float SHADOW_LARGE_RADIUS = 4.0f;
-    private static final float SHADOW_SMALL_RADIUS = 1.75f;
-    private static final float SHADOW_Y_OFFSET = 2.0f;
-    private static final int SHADOW_LARGE_COLOUR = 0xDD000000;
-    private static final int SHADOW_SMALL_COLOUR = 0xCC000000;
+    // Dimensions in DP
+    private static final float AMBIENT_SHADOW_RADIUS = 2.5f;
+    private static final float KEY_SHADOW_RADIUS = 1f;
+    private static final float KEY_SHADOW_OFFSET = 0.5f;
+    private static final int AMBIENT_SHADOW_COLOR = 0x33000000;
+    private static final int KEY_SHADOW_COLOR = 0x66000000;
 
     private static final int DISPLAY_WORKSPACE = 0;
     private static final int DISPLAY_ALL_APPS = 1;
-
-    private static final float FAST_SCROLL_FOCUS_MAX_SCALE = 1.15f;
-    private static final int FAST_SCROLL_FOCUS_MODE_NONE = 0;
-    private static final int FAST_SCROLL_FOCUS_MODE_SCALE_ICON = 1;
-    private static final int FAST_SCROLL_FOCUS_MODE_DRAW_CIRCLE_BG = 2;
-    private static final int FAST_SCROLL_FOCUS_FADE_IN_DURATION = 175;
-    private static final int FAST_SCROLL_FOCUS_FADE_OUT_DURATION = 125;
+    private static final int DISPLAY_FOLDER = 2;
 
     private final Launcher mLauncher;
     private Drawable mIcon;
+    private final boolean mCenterVertically;
     private final Drawable mBackground;
+    private OnLongClickListener mOnLongClickListener;
     private final CheckLongPressHelper mLongPressHelper;
     private final HolographicOutlineHelper mOutlineHelper;
     private final StylusEventHelper mStylusEventHelper;
@@ -87,17 +86,15 @@ public class BubbleTextView extends TextView
     private final boolean mCustomShadowsEnabled;
     private final boolean mLayoutHorizontal;
     private final int mIconSize;
+    @ViewDebug.ExportedProperty(category = "launcher")
     private int mTextColor;
 
+    @ViewDebug.ExportedProperty(category = "launcher")
     private boolean mStayPressed;
+    @ViewDebug.ExportedProperty(category = "launcher")
     private boolean mIgnorePressedStateChange;
+    @ViewDebug.ExportedProperty(category = "launcher")
     private boolean mDisableRelayout = false;
-
-    private ObjectAnimator mFastScrollFocusAnimator;
-    private Paint mFastScrollFocusBgPaint;
-    private float mFastScrollFocusFraction;
-    private boolean mFastScrollFocused;
-    private final int mFastScrollMode = FAST_SCROLL_FOCUS_MODE_SCALE_ICON;
 
     private IconLoadRequest mIconLoadRequest;
 
@@ -111,7 +108,7 @@ public class BubbleTextView extends TextView
 
     public BubbleTextView(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
-        mLauncher = (Launcher) context;
+        mLauncher = Launcher.getLauncher(context);
         DeviceProfile grid = mLauncher.getDeviceProfile();
 
         TypedArray a = context.obtainStyledAttributes(attrs,
@@ -127,38 +124,34 @@ public class BubbleTextView extends TextView
             setTextSize(TypedValue.COMPLEX_UNIT_PX, grid.iconTextSizePx);
         } else if (display == DISPLAY_ALL_APPS) {
             setTextSize(TypedValue.COMPLEX_UNIT_PX, grid.allAppsIconTextSizePx);
+            setCompoundDrawablePadding(grid.allAppsIconDrawablePaddingPx);
             defaultIconSize = grid.allAppsIconSizePx;
+        } else if (display == DISPLAY_FOLDER) {
+            setCompoundDrawablePadding(grid.folderChildDrawablePaddingPx);
         }
+        mCenterVertically = a.getBoolean(R.styleable.BubbleTextView_centerVertically, false);
 
         mIconSize = a.getDimensionPixelSize(R.styleable.BubbleTextView_iconSizeOverride,
                 defaultIconSize);
-
         a.recycle();
 
         if (mCustomShadowsEnabled) {
             // Draw the background itself as the parent is drawn twice.
             mBackground = getBackground();
             setBackground(null);
+
+            // Set shadow layer as the larger shadow to that the textView does not clip the shadow.
+            float density = getResources().getDisplayMetrics().density;
+            setShadowLayer(density * AMBIENT_SHADOW_RADIUS, 0, 0, AMBIENT_SHADOW_COLOR);
         } else {
             mBackground = null;
         }
 
         mLongPressHelper = new CheckLongPressHelper(this);
-        mStylusEventHelper = new StylusEventHelper(this);
+        mStylusEventHelper = new StylusEventHelper(new SimpleOnStylusPressListener(this), this);
 
         mOutlineHelper = HolographicOutlineHelper.obtain(getContext());
-        if (mCustomShadowsEnabled) {
-            setShadowLayer(SHADOW_LARGE_RADIUS, 0.0f, SHADOW_Y_OFFSET, SHADOW_LARGE_COLOUR);
-        }
-
-        if (mFastScrollMode == FAST_SCROLL_FOCUS_MODE_DRAW_CIRCLE_BG) {
-            mFastScrollFocusBgPaint = new Paint();
-            mFastScrollFocusBgPaint.setAntiAlias(true);
-            mFastScrollFocusBgPaint.setColor(
-                    getResources().getColor(R.color.container_fastscroll_thumb_active_color));
-        }
-
-        setAccessibilityDelegate(LauncherAppState.getInstance().getAccessibilityDelegate());
+        setAccessibilityDelegate(mLauncher.getAccessibilityDelegate());
     }
 
     public void applyFromShortcutInfo(ShortcutInfo info, IconCache iconCache) {
@@ -167,29 +160,16 @@ public class BubbleTextView extends TextView
 
     public void applyFromShortcutInfo(ShortcutInfo info, IconCache iconCache,
             boolean promiseStateChanged) {
-        Bitmap b = info.getIcon(iconCache);
-
-        FastBitmapDrawable iconDrawable = mLauncher.createIconDrawable(b);
-        iconDrawable.setGhostModeEnabled(info.isDisabled != 0);
-
-        setIcon(iconDrawable, mIconSize);
-        if (info.contentDescription != null) {
-            setContentDescription(info.contentDescription);
-        }
-        setText(info.title);
+        applyIconAndLabel(info.getIcon(iconCache), info);
         setTag(info);
-
         if (promiseStateChanged || info.isPromise()) {
             applyState(promiseStateChanged);
         }
     }
 
     public void applyFromApplicationInfo(AppInfo info) {
-        setIcon(mLauncher.createIconDrawable(info.iconBitmap), mIconSize);
-        setText(info.title);
-        if (info.contentDescription != null) {
-            setContentDescription(info.contentDescription);
-        }
+        applyIconAndLabel(info.iconBitmap, info);
+
         // We don't need to check the info since it's not a ShortcutInfo
         super.setTag(info);
 
@@ -198,16 +178,35 @@ public class BubbleTextView extends TextView
     }
 
     public void applyFromPackageItemInfo(PackageItemInfo info) {
-        setIcon(mLauncher.createIconDrawable(info.iconBitmap), mIconSize);
-        setText(info.title);
-        if (info.contentDescription != null) {
-            setContentDescription(info.contentDescription);
-        }
+        applyIconAndLabel(info.iconBitmap, info);
         // We don't need to check the info since it's not a ShortcutInfo
         super.setTag(info);
 
         // Verify high res immediately
         verifyHighRes();
+    }
+
+    private void applyIconAndLabel(Bitmap icon, ItemInfo info) {
+        FastBitmapDrawable iconDrawable = mLauncher.createIconDrawable(icon);
+        if (info.isDisabled()) {
+            iconDrawable.setState(FastBitmapDrawable.State.DISABLED);
+        }
+        setIcon(iconDrawable);
+        setText(info.title);
+        if (info.contentDescription != null) {
+            setContentDescription(info.isDisabled()
+                    ? getContext().getString(R.string.disabled_app_label, info.contentDescription)
+                    : info.contentDescription);
+        }
+    }
+
+    /**
+     * Used for measurement only, sets some dummy values on this view.
+     */
+    public void applyDummyInfo() {
+        ColorDrawable d = new ColorDrawable();
+        setIcon(mLauncher.resizeIconDrawable(d));
+        setText("");
     }
 
     /**
@@ -259,8 +258,26 @@ public class BubbleTextView extends TextView
 
     private void updateIconState() {
         if (mIcon instanceof FastBitmapDrawable) {
-            ((FastBitmapDrawable) mIcon).setPressed(isPressed() || mStayPressed);
+            FastBitmapDrawable d = (FastBitmapDrawable) mIcon;
+            if (getTag() instanceof ItemInfo
+                    && ((ItemInfo) getTag()).isDisabled()) {
+                d.animateState(FastBitmapDrawable.State.DISABLED);
+            } else if (isPressed() || mStayPressed) {
+                d.animateState(FastBitmapDrawable.State.PRESSED);
+            } else {
+                d.animateState(FastBitmapDrawable.State.NORMAL);
+            }
         }
+    }
+
+    @Override
+    public void setOnLongClickListener(OnLongClickListener l) {
+        super.setOnLongClickListener(l);
+        mOnLongClickListener = l;
+    }
+
+    public OnLongClickListener getOnLongClickListener() {
+        return mOnLongClickListener;
     }
 
     @Override
@@ -270,7 +287,7 @@ public class BubbleTextView extends TextView
         boolean result = super.onTouchEvent(event);
 
         // Check for a stylus button press, if it occurs cancel any long press checks.
-        if (mStylusEventHelper.checkAndPerformStylusEvent(event)) {
+        if (mStylusEventHelper.onMotionEvent(event)) {
             mLongPressHelper.cancelLongPress();
             result = true;
         }
@@ -311,6 +328,7 @@ public class BubbleTextView extends TextView
     void setStayPressed(boolean stayPressed) {
         mStayPressed = stayPressed;
         if (!stayPressed) {
+            HolographicOutlineHelper.obtain(getContext()).recycleShadowBitmap(mPressedBackground);
             mPressedBackground = null;
         } else {
             if (mPressedBackground == null) {
@@ -362,18 +380,7 @@ public class BubbleTextView extends TextView
     @Override
     public void draw(Canvas canvas) {
         if (!mCustomShadowsEnabled) {
-            // Draw the fast scroll focus bg if we have one
-            if (mFastScrollMode == FAST_SCROLL_FOCUS_MODE_DRAW_CIRCLE_BG &&
-                    mFastScrollFocusFraction > 0f) {
-                DeviceProfile grid = mLauncher.getDeviceProfile();
-                int iconCenterX = getScrollX() + (getWidth() / 2);
-                int iconCenterY = getScrollY() + getPaddingTop() + (grid.iconSizePx / 2);
-                canvas.drawCircle(iconCenterX, iconCenterY,
-                        mFastScrollFocusFraction * (getWidth() / 2), mFastScrollFocusBgPaint);
-            }
-
             super.draw(canvas);
-
             return;
         }
 
@@ -404,13 +411,15 @@ public class BubbleTextView extends TextView
         }
 
         // We enhance the shadow by drawing the shadow twice
-        getPaint().setShadowLayer(SHADOW_LARGE_RADIUS, 0.0f, SHADOW_Y_OFFSET, SHADOW_LARGE_COLOUR);
+        float density = getResources().getDisplayMetrics().density;
+        getPaint().setShadowLayer(density * AMBIENT_SHADOW_RADIUS, 0, 0, AMBIENT_SHADOW_COLOR);
         super.draw(canvas);
         canvas.save(Canvas.CLIP_SAVE_FLAG);
         canvas.clipRect(getScrollX(), getScrollY() + getExtendedPaddingTop(),
                 getScrollX() + getWidth(),
                 getScrollY() + getHeight(), Region.Op.INTERSECT);
-        getPaint().setShadowLayer(SHADOW_SMALL_RADIUS, 0.0f, 0.0f, SHADOW_SMALL_COLOUR);
+        getPaint().setShadowLayer(
+                density * KEY_SHADOW_RADIUS, 0.0f, density * KEY_SHADOW_OFFSET, KEY_SHADOW_COLOR);
         super.draw(canvas);
         canvas.restore();
     }
@@ -425,6 +434,19 @@ public class BubbleTextView extends TextView
             ((PreloadIconDrawable) mIcon).applyPreloaderTheme(getPreloaderTheme());
         }
         mSlop = ViewConfiguration.get(getContext()).getScaledTouchSlop();
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        if (mCenterVertically) {
+            Paint.FontMetrics fm = getPaint().getFontMetrics();
+            int cellHeightPx = mIconSize + getCompoundDrawablePadding() +
+                    (int) Math.ceil(fm.bottom - fm.top);
+            int height = MeasureSpec.getSize(heightMeasureSpec);
+            setPadding(getPaddingLeft(), (height - cellHeightPx) / 2, getPaddingRight(),
+                    getPaddingBottom());
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
     }
 
     @Override
@@ -469,13 +491,18 @@ public class BubbleTextView extends TextView
                     ((info.hasStatusFlag(ShortcutInfo.FLAG_INSTALL_SESSION_ACTIVE) ?
                             info.getInstallProgress() : 0)) : 100;
 
+            setContentDescription(progressLevel > 0 ?
+                getContext().getString(R.string.app_downloading_title, info.title,
+                        NumberFormat.getPercentInstance().format(progressLevel * 0.01)) :
+                    getContext().getString(R.string.app_waiting_download_title, info.title));
+
             if (mIcon != null) {
                 final PreloadIconDrawable preloadDrawable;
                 if (mIcon instanceof PreloadIconDrawable) {
                     preloadDrawable = (PreloadIconDrawable) mIcon;
                 } else {
                     preloadDrawable = new PreloadIconDrawable(mIcon, getPreloaderTheme());
-                    setIcon(preloadDrawable, mIconSize);
+                    setIcon(preloadDrawable);
                 }
 
                 preloadDrawable.setLevel(progressLevel);
@@ -504,21 +531,24 @@ public class BubbleTextView extends TextView
      * Sets the icon for this view based on the layout direction.
      */
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
-    private Drawable setIcon(Drawable icon, int iconSize) {
+    private void setIcon(Drawable icon) {
         mIcon = icon;
-        if (iconSize != -1) {
-            mIcon.setBounds(0, 0, iconSize, iconSize);
+        if (mIconSize != -1) {
+            mIcon.setBounds(0, 0, mIconSize, mIconSize);
         }
+        applyCompoundDrawables(mIcon);
+    }
+
+    protected void applyCompoundDrawables(Drawable icon) {
         if (mLayoutHorizontal) {
             if (Utilities.ATLEAST_JB_MR1) {
-                setCompoundDrawablesRelative(mIcon, null, null, null);
+                setCompoundDrawablesRelative(icon, null, null, null);
             } else {
-                setCompoundDrawables(mIcon, null, null, null);
+                setCompoundDrawables(icon, null, null, null);
             }
         } else {
-            setCompoundDrawables(null, mIcon, null, null);
+            setCompoundDrawables(null, icon, null, null);
         }
-        return icon;
     }
 
     @Override
@@ -533,8 +563,13 @@ public class BubbleTextView extends TextView
      */
     public void reapplyItemInfo(final ItemInfo info) {
         if (getTag() == info) {
+            FastBitmapDrawable.State prevState = FastBitmapDrawable.State.NORMAL;
+            if (mIcon instanceof FastBitmapDrawable) {
+                prevState = ((FastBitmapDrawable) mIcon).getCurrentState();
+            }
             mIconLoadRequest = null;
             mDisableRelayout = true;
+
             if (info instanceof AppInfo) {
                 applyFromApplicationInfo((AppInfo) info);
             } else if (info instanceof ShortcutInfo) {
@@ -550,6 +585,13 @@ public class BubbleTextView extends TextView
             } else if (info instanceof PackageItemInfo) {
                 applyFromPackageItemInfo((PackageItemInfo) info);
             }
+
+            // If we are reapplying over an old icon, then we should update the new icon to the same
+            // state as the old icon
+            if (mIcon instanceof FastBitmapDrawable) {
+                ((FastBitmapDrawable) mIcon).setState(prevState);
+            }
+
             mDisableRelayout = false;
         }
     }
@@ -583,55 +625,60 @@ public class BubbleTextView extends TextView
         }
     }
 
-    // Setters & getters for the animation
-    public void setFastScrollFocus(float fraction) {
-        mFastScrollFocusFraction = fraction;
-        if (mFastScrollMode == FAST_SCROLL_FOCUS_MODE_SCALE_ICON) {
-            setScaleX(1f + fraction * (FAST_SCROLL_FOCUS_MAX_SCALE - 1f));
-            setScaleY(1f + fraction * (FAST_SCROLL_FOCUS_MAX_SCALE - 1f));
-        } else {
-            invalidate();
-        }
-    }
-
-    public float getFastScrollFocus() {
-        return mFastScrollFocusFraction;
-    }
-
     @Override
-    public void setFastScrollFocused(final boolean focused, boolean animated) {
-        if (mFastScrollMode == FAST_SCROLL_FOCUS_MODE_NONE) {
+    public void setFastScrollFocusState(final FastBitmapDrawable.State focusState, boolean animated) {
+        // We can only set the fast scroll focus state on a FastBitmapDrawable
+        if (!(mIcon instanceof FastBitmapDrawable)) {
             return;
         }
 
-        if (mFastScrollFocused != focused) {
-            mFastScrollFocused = focused;
-
-            if (animated) {
-                // Clean up the previous focus animator
-                if (mFastScrollFocusAnimator != null) {
-                    mFastScrollFocusAnimator.cancel();
-                }
-                mFastScrollFocusAnimator = ObjectAnimator.ofFloat(this, "fastScrollFocus",
-                        focused ? 1f : 0f);
-                if (focused) {
-                    mFastScrollFocusAnimator.setInterpolator(new DecelerateInterpolator());
-                } else {
-                    mFastScrollFocusAnimator.setInterpolator(new AccelerateInterpolator());
-                }
-                mFastScrollFocusAnimator.setDuration(focused ?
-                        FAST_SCROLL_FOCUS_FADE_IN_DURATION : FAST_SCROLL_FOCUS_FADE_OUT_DURATION);
-                mFastScrollFocusAnimator.start();
-            } else {
-                mFastScrollFocusFraction = focused ? 1f : 0f;
+        FastBitmapDrawable d = (FastBitmapDrawable) mIcon;
+        if (animated) {
+            FastBitmapDrawable.State prevState = d.getCurrentState();
+            if (d.animateState(focusState)) {
+                // If the state was updated, then update the view accordingly
+                animate().scaleX(focusState.viewScale)
+                        .scaleY(focusState.viewScale)
+                        .setStartDelay(getStartDelayForStateChange(prevState, focusState))
+                        .setDuration(d.getDurationForStateChange(prevState, focusState))
+                        .start();
+            }
+        } else {
+            if (d.setState(focusState)) {
+                // If the state was updated, then update the view accordingly
+                animate().cancel();
+                setScaleX(focusState.viewScale);
+                setScaleY(focusState.viewScale);
             }
         }
     }
 
     /**
+     * Returns true if the view can show custom shortcuts.
+     */
+    public boolean hasDeepShortcuts() {
+        return !mLauncher.getShortcutIdsForItem((ItemInfo) getTag()).isEmpty();
+    }
+
+    /**
+     * Returns the start delay when animating between certain {@link FastBitmapDrawable} states.
+     */
+    private static int getStartDelayForStateChange(final FastBitmapDrawable.State fromState,
+            final FastBitmapDrawable.State toState) {
+        switch (toState) {
+            case NORMAL:
+                switch (fromState) {
+                    case FAST_SCROLL_HIGHLIGHTED:
+                        return FastBitmapDrawable.FAST_SCROLL_INACTIVE_DURATION / 4;
+                }
+        }
+        return 0;
+    }
+
+    /**
      * Interface to be implemented by the grand parent to allow click shadow effect.
      */
-    public static interface BubbleTextShadowHandler {
+    public interface BubbleTextShadowHandler {
         void setPressedIcon(BubbleTextView icon, Bitmap background);
     }
 }

@@ -19,14 +19,20 @@ package com.android.launcher3;
 import android.appwidget.AppWidgetHostView;
 import android.appwidget.AppWidgetProviderInfo;
 import android.content.Context;
+import android.graphics.Rect;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewDebug;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.RemoteViews;
 
-import com.android.launcher3.DragLayer.TouchCompleteListener;
+import com.android.launcher3.dragndrop.DragLayer.TouchCompleteListener;
+
+import java.util.ArrayList;
 
 /**
  * {@inheritDoc}
@@ -38,24 +44,29 @@ public class LauncherAppWidgetHostView extends AppWidgetHostView implements Touc
     private CheckLongPressHelper mLongPressHelper;
     private StylusEventHelper mStylusEventHelper;
     private Context mContext;
+    @ViewDebug.ExportedProperty(category = "launcher")
     private int mPreviousOrientation;
-    private DragLayer mDragLayer;
 
     private float mSlop;
+
+    @ViewDebug.ExportedProperty(category = "launcher")
+    private boolean mChildrenFocused;
+
+    protected int mErrorViewId = R.layout.appwidget_error;
 
     public LauncherAppWidgetHostView(Context context) {
         super(context);
         mContext = context;
         mLongPressHelper = new CheckLongPressHelper(this);
-        mStylusEventHelper = new StylusEventHelper(this);
+        mStylusEventHelper = new StylusEventHelper(new SimpleOnStylusPressListener(this), this);
         mInflater = (LayoutInflater) context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
-        mDragLayer = ((Launcher) context).getDragLayer();
-        setAccessibilityDelegate(LauncherAppState.getInstance().getAccessibilityDelegate());
+        setAccessibilityDelegate(Launcher.getLauncher(context).getAccessibilityDelegate());
+        setBackgroundResource(R.drawable.widget_internal_focus_bg);
     }
 
     @Override
     protected View getErrorView() {
-        return mInflater.inflate(R.layout.appwidget_error, this, false);
+        return mInflater.inflate(mErrorViewId, this, false);
     }
 
     public void updateLastInflationOrientation() {
@@ -93,7 +104,7 @@ public class LauncherAppWidgetHostView extends AppWidgetHostView implements Touc
 
         // Watch for longpress or stylus button press events at this level to
         // make sure users can always pick up this widget
-        if (mStylusEventHelper.checkAndPerformStylusEvent(ev)) {
+        if (mStylusEventHelper.onMotionEvent(ev)) {
             mLongPressHelper.cancelLongPress();
             return true;
         }
@@ -102,7 +113,7 @@ public class LauncherAppWidgetHostView extends AppWidgetHostView implements Touc
                 if (!mStylusEventHelper.inStylusButtonPressed()) {
                     mLongPressHelper.postCheckForLongPress();
                 }
-                mDragLayer.setTouchCompleteListener(this);
+                Launcher.getLauncher(getContext()).getDragLayer().setTouchCompleteListener(this);
                 break;
             }
 
@@ -175,6 +186,114 @@ public class LauncherAppWidgetHostView extends AppWidgetHostView implements Touc
 
     @Override
     public int getDescendantFocusability() {
-        return ViewGroup.FOCUS_BLOCK_DESCENDANTS;
+        return mChildrenFocused ? ViewGroup.FOCUS_BEFORE_DESCENDANTS
+                : ViewGroup.FOCUS_BLOCK_DESCENDANTS;
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (mChildrenFocused && event.getKeyCode() == KeyEvent.KEYCODE_ESCAPE
+                && event.getAction() == KeyEvent.ACTION_UP) {
+            mChildrenFocused = false;
+            requestFocus();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (!mChildrenFocused && keyCode == KeyEvent.KEYCODE_ENTER) {
+            event.startTracking();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (event.isTracking()) {
+            if (!mChildrenFocused && keyCode == KeyEvent.KEYCODE_ENTER) {
+                mChildrenFocused = true;
+                ArrayList<View> focusableChildren = getFocusables(FOCUS_FORWARD);
+                focusableChildren.remove(this);
+                int childrenCount = focusableChildren.size();
+                switch (childrenCount) {
+                    case 0:
+                        mChildrenFocused = false;
+                        break;
+                    case 1: {
+                        if (getTag() instanceof ItemInfo) {
+                            ItemInfo item = (ItemInfo) getTag();
+                            if (item.spanX == 1 && item.spanY == 1) {
+                                focusableChildren.get(0).performClick();
+                                mChildrenFocused = false;
+                                return true;
+                            }
+                        }
+                        // continue;
+                    }
+                    default:
+                        focusableChildren.get(0).requestFocus();
+                        return true;
+                }
+            }
+        }
+        return super.onKeyUp(keyCode, event);
+    }
+
+    @Override
+    protected void onFocusChanged(boolean gainFocus, int direction, Rect previouslyFocusedRect) {
+        if (gainFocus) {
+            mChildrenFocused = false;
+            dispatchChildFocus(false);
+        }
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect);
+    }
+
+    @Override
+    public void requestChildFocus(View child, View focused) {
+        super.requestChildFocus(child, focused);
+        dispatchChildFocus(mChildrenFocused && focused != null);
+        if (focused != null) {
+            focused.setFocusableInTouchMode(false);
+        }
+    }
+
+    @Override
+    public void clearChildFocus(View child) {
+        super.clearChildFocus(child);
+        dispatchChildFocus(false);
+    }
+
+    @Override
+    public boolean dispatchUnhandledMove(View focused, int direction) {
+        return mChildrenFocused;
+    }
+
+    private void dispatchChildFocus(boolean childIsFocused) {
+        // The host view's background changes when selected, to indicate the focus is inside.
+        setSelected(childIsFocused);
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        try {
+            super.onLayout(changed, left, top, right, bottom);
+        } catch (final RuntimeException e) {
+            post(new Runnable() {
+                @Override
+                public void run() {
+                    // Update the widget with 0 Layout id, to reset the view to error view.
+                    updateAppWidget(new RemoteViews(getAppWidgetInfo().provider.getPackageName(), 0));
+                }
+            });
+        }
+    }
+
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+        super.onInitializeAccessibilityNodeInfo(info);
+        info.setClassName(getClass().getName());
     }
 }

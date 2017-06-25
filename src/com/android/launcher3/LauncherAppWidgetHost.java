@@ -20,6 +20,7 @@ import android.appwidget.AppWidgetHost;
 import android.appwidget.AppWidgetHostView;
 import android.appwidget.AppWidgetProviderInfo;
 import android.content.Context;
+import android.os.DeadObjectException;
 import android.os.TransactionTooLargeException;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -36,7 +37,6 @@ public class LauncherAppWidgetHost extends AppWidgetHost {
 
     private final ArrayList<Runnable> mProviderChangeListeners = new ArrayList<Runnable>();
 
-    private int mQsbWidgetId = -1;
     private Launcher mLauncher;
 
     public LauncherAppWidgetHost(Launcher launcher, int hostId) {
@@ -44,23 +44,9 @@ public class LauncherAppWidgetHost extends AppWidgetHost {
         mLauncher = launcher;
     }
 
-    public void setQsbWidgetId(int widgetId) {
-        mQsbWidgetId = widgetId;
-    }
-
     @Override
     protected AppWidgetHostView onCreateView(Context context, int appWidgetId,
             AppWidgetProviderInfo appWidget) {
-        if (appWidgetId == mQsbWidgetId) {
-            return new LauncherAppWidgetHostView(context) {
-
-                @Override
-                protected View getErrorView() {
-                    // For the QSB, show an empty view instead of an error view.
-                    return new View(getContext());
-                }
-            };
-        }
         return new LauncherAppWidgetHostView(context);
     }
 
@@ -69,7 +55,8 @@ public class LauncherAppWidgetHost extends AppWidgetHost {
         try {
             super.startListening();
         } catch (Exception e) {
-            if (e.getCause() instanceof TransactionTooLargeException) {
+            if (e.getCause() instanceof TransactionTooLargeException ||
+                    e.getCause() instanceof DeadObjectException) {
                 // We're willing to let this slide. The exception is being caused by the list of
                 // RemoteViews which is being passed back. The startListening relationship will
                 // have been established by this point, and we will end up populating the
@@ -78,12 +65,6 @@ public class LauncherAppWidgetHost extends AppWidgetHost {
                 throw new RuntimeException(e);
             }
         }
-    }
-
-    @Override
-    public void stopListening() {
-        super.stopListening();
-        clearViews();
     }
 
     public void addProviderChangeListener(Runnable callback) {
@@ -99,6 +80,10 @@ public class LauncherAppWidgetHost extends AppWidgetHost {
             for (Runnable callback : new ArrayList<>(mProviderChangeListeners)) {
                 callback.run();
             }
+        }
+
+        if (Utilities.ATLEAST_MARSHMALLOW) {
+            mLauncher.notifyWidgetProvidersChanged();
         }
     }
 
@@ -125,5 +110,8 @@ public class LauncherAppWidgetHost extends AppWidgetHost {
         LauncherAppWidgetProviderInfo info = LauncherAppWidgetProviderInfo.fromProviderInfo(
                 mLauncher, appWidget);
         super.onProviderChanged(appWidgetId, info);
+        // The super method updates the dimensions of the providerInfo. Update the
+        // launcher spans accordingly.
+        info.initSpans();
     }
 }

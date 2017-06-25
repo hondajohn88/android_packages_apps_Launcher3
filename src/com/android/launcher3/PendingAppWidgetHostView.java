@@ -32,6 +32,7 @@ import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
 import android.util.TypedValue;
+import android.view.ContextThemeWrapper;
 import android.view.View;
 import android.view.View.OnClickListener;
 
@@ -63,9 +64,9 @@ public class PendingAppWidgetHostView extends LauncherAppWidgetHostView implemen
     @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     public PendingAppWidgetHostView(Context context, LauncherAppWidgetInfo info,
             boolean disabledForSafeMode) {
-        super(context);
+        super(new ContextThemeWrapper(context, R.style.WidgetContainerTheme));
 
-        mLauncher = (Launcher) context;
+        mLauncher = Launcher.getLauncher(context);
         mInfo = info;
         mStartState = info.restoreStatus;
         mIconLookupIntent = new Intent().setComponent(info.providerName);
@@ -133,7 +134,7 @@ public class PendingAppWidgetHostView extends LauncherAppWidgetHostView implemen
             //   3) Setup icon in the center and app icon in the top right corner.
             if (mDisabledForSafeMode) {
                 FastBitmapDrawable disabledIcon = mLauncher.createIconDrawable(mIcon);
-                disabledIcon.setGhostModeEnabled(true);
+                disabledIcon.setState(FastBitmapDrawable.State.DISABLED);
                 mCenterDrawable = disabledIcon;
                 mSettingIconDrawable = null;
             } else if (isReadyForClickSetup()) {
@@ -189,9 +190,19 @@ public class PendingAppWidgetHostView extends LauncherAppWidgetHostView implemen
         }
     }
 
+    /**
+     * A pending widget is ready for setup after the provider is installed and
+     *   1) Widget id is not valid: the widget id is not yet bound to the provider, probably
+     *                              because the launcher doesn't have appropriate permissions.
+     *                              Note that we would still have an allocated id as that does not
+     *                              require any permissions and can be done during view inflation.
+     *   2) UI is not ready: the id is valid and the bound. But the widget has a configure activity
+     *                       which needs to be called once.
+     */
     public boolean isReadyForClickSetup() {
-        return (mInfo.restoreStatus & LauncherAppWidgetInfo.FLAG_PROVIDER_NOT_READY) == 0
-                && (mInfo.restoreStatus & LauncherAppWidgetInfo.FLAG_UI_NOT_READY) != 0;
+        return !mInfo.hasRestoreFlag(LauncherAppWidgetInfo.FLAG_PROVIDER_NOT_READY)
+                && (mInfo.hasRestoreFlag(LauncherAppWidgetInfo.FLAG_UI_NOT_READY)
+                || mInfo.hasRestoreFlag(LauncherAppWidgetInfo.FLAG_ID_NOT_VALID));
     }
 
     private void updateDrawableBounds() {
@@ -218,7 +229,7 @@ public class PendingAppWidgetHostView extends LauncherAppWidgetHostView implemen
             mRect.offsetTo((getWidth() - mRect.width()) / 2, (getHeight() - mRect.height()) / 2);
             mCenterDrawable.setBounds(mRect);
         } else  {
-            float iconSize = Math.min(availableWidth, availableHeight);
+            float iconSize = Math.max(0, Math.min(availableWidth, availableHeight));
 
             // Use twice the setting size factor, as the setting is drawn at a corner and the
             // icon is drawn in the center.
@@ -231,26 +242,30 @@ public class PendingAppWidgetHostView extends LauncherAppWidgetHostView implemen
 
             int actualIconSize = (int) Math.min(iconSize, grid.iconSizePx);
 
-            // Recreate the setup text.
-            mSetupTextLayout = new StaticLayout(
-                    getResources().getText(R.string.gadget_setup_text), mPaint, availableWidth,
-                    Layout.Alignment.ALIGN_CENTER, 1, 0, true);
-            int textHeight = mSetupTextLayout.getHeight();
+            // Icon top when we do not draw the text
+            int iconTop = (getHeight() - actualIconSize) / 2;
+            mSetupTextLayout = null;
 
-            // Extra icon size due to the setting icon
-            float minHeightWithText = textHeight + actualIconSize * settingIconScaleFactor
-                    + grid.iconDrawablePaddingPx;
+            if (availableWidth > 0) {
+                // Recreate the setup text.
+                mSetupTextLayout = new StaticLayout(
+                        getResources().getText(R.string.gadget_setup_text), mPaint, availableWidth,
+                        Layout.Alignment.ALIGN_CENTER, 1, 0, true);
+                int textHeight = mSetupTextLayout.getHeight();
 
-            int iconTop;
-            if (minHeightWithText < availableHeight) {
-                // We can draw the text as well
-                iconTop =  (getHeight() - textHeight -
-                        grid.iconDrawablePaddingPx - actualIconSize) / 2;
+                // Extra icon size due to the setting icon
+                float minHeightWithText = textHeight + actualIconSize * settingIconScaleFactor
+                        + grid.iconDrawablePaddingPx;
 
-            } else {
-                // The text will not fit. Only draw the icons.
-                iconTop = (getHeight() - actualIconSize) / 2;
-                mSetupTextLayout = null;
+                if (minHeightWithText < availableHeight) {
+                    // We can draw the text as well
+                    iconTop = (getHeight() - textHeight -
+                            grid.iconDrawablePaddingPx - actualIconSize) / 2;
+
+                } else {
+                    // We can't draw the text. Let the iconTop be same as before.
+                    mSetupTextLayout = null;
+                }
             }
 
             mRect.set(0, 0, actualIconSize, actualIconSize);
